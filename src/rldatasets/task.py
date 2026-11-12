@@ -137,6 +137,8 @@ class Result:
     target_format: str
     output: Path
     tasks: list[Task]
+    action: str = "Converted"
+    extra_notes: list[str] = field(default_factory=list)
 
     @property
     def notes(self) -> list[str]:
@@ -145,14 +147,19 @@ class Result:
         if missing:
             notes.append(f"{missing} tasks have no answer.")
         if self.target_format in {"verifiers", "nemo-gym"} and any(task.files for task in self.tasks):
-            notes.append("Sandbox files were copied under files/.")
+            if self.target_format == "nemo-gym" and (self.output / "dataset.toml").is_file():
+                notes.append("Sandbox files were copied into task folders.")
+            else:
+                notes.append("Sandbox files were copied under files/.")
+        notes.extend(self.extra_notes)
         return notes
 
     def render(self) -> str:
         count = len(self.tasks)
         noun = "task" if count == 1 else "tasks"
+        preposition = "into" if self.action == "Merged" else "to"
         lines = [
-            f"Converted {count} {noun} from {self.source_format} to {self.target_format}.",
+            f"{self.action} {count} {noun} from {self.source_format} {preposition} {self.target_format}.",
             f"Output: {self.output}",
         ]
         if self.notes:
@@ -314,7 +321,7 @@ def _looks_like_row(payload: dict[str, Any]) -> bool:
 class Catalog:
     """Registered formats and the convert path between them."""
 
-    priority = ("openenv", "harbor", "nemo-gym", "verifiers")
+    priority = ("openenv", "nemo-gym", "harbor", "verifiers")
 
     def __init__(self) -> None:
         self._formats: dict[str, Format] = {}
@@ -371,6 +378,77 @@ class Catalog:
         target = self.get(to)
         target.dump(tasks, dest)
         return Result(origin.name, target.name, dest, tasks)
+
+    def merge(
+        self,
+        sources: list[str | Path],
+        destination: str | Path,
+        to: str,
+        source_format: str | None = None,
+    ) -> Result:
+        if len(sources) < 2:
+            raise ValueError("Merge needs at least two datasets.")
+        dest = Path(destination)
+        tasks: list[Task] = []
+        names: list[str] = []
+        seen: set[Path] = set()
+        for source in sources:
+            src = Path(source)
+            if not src.exists():
+                raise ValueError(f"Dataset not found: {src}")
+            resolved = src.resolve()
+            if resolved == dest.resolve():
+                raise ValueError("Source and output are the same path.")
+            if resolved in seen:
+                raise ValueError(f"Dataset listed more than once: {src}")
+            seen.add(resolved)
+            origin = self.get(source_format) if source_format else self.detect(src)
+            names.append(origin.name)
+            tasks.extend(origin.load(src))
+        renamed = _unique_task_ids(tasks)
+        notes = _dataset_file_notes(tasks)
+        if renamed:
+            noun = "id" if renamed == 1 else "ids"
+            notes.insert(0, f"Renamed {renamed} task {noun} so every id is unique.")
+        target = self.get(to)
+        target.dump(tasks, dest)
+        return Result(", ".join(names), target.name, dest, tasks, action="Merged", extra_notes=notes)
+
+
+def _unique_task_ids(tasks: list[Task]) -> int:
+    used: set[str] = set()
+    renamed = 0
+    for task in tasks:
+        candidate = task.id
+        index = 2
+        while candidate in used:
+            candidate = f"{task.id}-{index}"
+            index += 1
+        if candidate != task.id:
+            renamed += 1
+            task.id = candidate
+        used.add(candidate)
+    return renamed
+
+
+def _dataset_file_notes(tasks: list[Task]) -> list[str]:
+    seen: dict[str, str] = {}
+    conflicts: list[str] = []
+    for task in tasks:
+        raw = task.metadata.get("rldatasets_dataset")
+        if not isinstance(raw, dict) or not isinstance(raw.get("files"), dict):
+            continue
+        for name, text in raw["files"].items():
+            if not isinstance(text, str):
+                continue
+            previous = seen.get(name)
+            if previous is None:
+                seen[name] = text
+            elif previous != text and name not in conflicts:
+                conflicts.append(name)
+    if not conflicts:
+        return []
+    return [f"Kept the first copy of {', '.join(conflicts)}."]
 
 
 catalog = Catalog()
