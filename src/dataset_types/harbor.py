@@ -6,13 +6,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-from rldatasets.task import SKIP_DIRS, File, Format, Message, Task, catalog, plain, slug
+from rldatasets.task import SKIP_DIRS, File, Format, Message, Task, catalog, plain, safe_path, slug
 
 import tomllib
 
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 _ANSWER_KEYS = ("answer", "expected_answer", "gold_answer", "gold", "target")
 _SKIP_FILES = {"instruction.md", "task.toml"}
+_DATASET_FILES = ("verifier.py", "task_data.py")
 
 
 class Toml:
@@ -128,6 +129,7 @@ class Harbor(Format):
             seen[task.id] = count
             if count > 1:
                 task.id = f"{task.id}-{count}"
+        self._attach_dataset_files(path, tasks)
         return tasks
 
     def dump(self, tasks: list[Task], path: Path) -> None:
@@ -142,26 +144,36 @@ class Harbor(Format):
                 index += 1
             used.add(folder_name)
             self._write_dir(task, path / "tasks" / folder_name)
+        self._write_dataset_files(tasks, path)
 
     def task_dirs(self, path: Path) -> list[Path]:
         if not path.is_dir():
             return []
-        if (path / "task.toml").is_file() and (path / "instruction.md").is_file():
+        children = list(path.iterdir())
+        filenames = [item.name for item in children if item.is_file()]
+        dirnames = [item.name for item in children if item.is_dir()]
+        if self._is_task_dir(filenames, dirnames):
             return [path]
         found: list[Path] = []
         for dirpath, dirnames, filenames in os.walk(path):
             dirnames[:] = sorted(name for name in dirnames if name not in SKIP_DIRS and not name.startswith("."))
-            if "task.toml" in filenames and "instruction.md" in filenames:
+            if self._is_task_dir(filenames, dirnames):
                 found.append(Path(dirpath))
                 dirnames[:] = []
         return found
 
+    def _is_task_dir(self, filenames: list[str], dirnames: list[str]) -> bool:
+        if "task.toml" not in filenames:
+            return False
+        return "instruction.md" in filenames or "steps" in dirnames
+
     def _read_dir(self, task_dir: Path) -> Task:
         try:
             document = Toml.read((task_dir / "task.toml").read_text(encoding="utf-8"))
+            instruction_path = task_dir / "instruction.md"
+            instruction = instruction_path.read_text(encoding="utf-8") if instruction_path.is_file() else ""
         except OSError as exc:
-            raise ValueError(f"Could not read {task_dir / 'task.toml'}: {exc}") from exc
-        instruction = (task_dir / "instruction.md").read_text(encoding="utf-8")
+            raise ValueError(f"Could not read {task_dir}: {exc}") from exc
         task_table = document.get("task") if isinstance(document.get("task"), dict) else {}
         meta = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
         return Task(
@@ -179,7 +191,9 @@ class Harbor(Format):
             if Path(asset.path).name in _SKIP_FILES and "/" not in asset.path:
                 continue
             asset.write_into(task_dir)
-        (task_dir / "instruction.md").write_bytes(task.instruction.encode("utf-8"))
+        has_steps = any(Path(asset.path).as_posix().startswith("steps/") for asset in task.files)
+        if task.instruction or not has_steps:
+            (task_dir / "instruction.md").write_bytes(task.instruction.encode("utf-8"))
         (task_dir / "task.toml").write_bytes(Toml.write(self._document(task)).encode("utf-8"))
 
     def _messages(self, instruction: str, meta: dict[str, Any]) -> list[Message]:
@@ -228,8 +242,38 @@ class Harbor(Format):
             )
         else:
             meta.pop("rldatasets_messages", None)
+        document.pop("rldatasets_dataset", None)
+        meta.pop("rldatasets_dataset", None)
         document["schema_version"] = str(document.get("schema_version") or "1.4")
         return document
+
+    def _attach_dataset_files(self, path: Path, tasks: list[Task]) -> None:
+        if not tasks or (path / "task.toml").is_file():
+            return
+        files: dict[str, str] = {}
+        for name in _DATASET_FILES:
+            file = path / name
+            if file.is_file() and not file.is_symlink():
+                files[name] = file.read_text(encoding="utf-8")
+        if not files:
+            return
+        for task in tasks:
+            current = task.metadata.get("rldatasets_dataset")
+            data = dict(current) if isinstance(current, dict) else {}
+            data["files"] = dict(files)
+            task.metadata["rldatasets_dataset"] = data
+
+    def _write_dataset_files(self, tasks: list[Task], path: Path) -> None:
+        files: dict[str, str] = {}
+        for task in tasks:
+            raw = task.metadata.get("rldatasets_dataset")
+            if not isinstance(raw, dict) or not isinstance(raw.get("files"), dict):
+                continue
+            for name, text in raw["files"].items():
+                if name in _DATASET_FILES and isinstance(text, str) and name not in files:
+                    files[name] = text
+        for name, text in files.items():
+            safe_path(path, name).write_bytes(text.encode("utf-8"))
 
     def _is_document(self, metadata: dict[str, Any]) -> bool:
         if "schema_version" in metadata:

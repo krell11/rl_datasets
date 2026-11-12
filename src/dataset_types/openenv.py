@@ -31,10 +31,7 @@ class OpenEnv(Format):
         text = (
             "spec_version: 1\n"
             f"name: {name}\n"
-            "type: space\n"
-            "runtime: fastapi\n"
-            "app: server:app\n"
-            "port: 8000\n"
+            "type: harbor-dataset\n"
         )
         path.mkdir(parents=True, exist_ok=True)
         (path / "openenv.yaml").write_bytes(text.encode("utf-8"))

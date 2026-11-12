@@ -73,7 +73,7 @@ class Verifiers(Format):
             "example_id": index,
             "task": group,
             "prompt": [message.export_verifiers() for message in task.messages],
-            "info": json.dumps(plain(info), ensure_ascii=False),
+            "info": plain(info),
         }
         if task.answer is not None:
             row["answer"] = task.answer

@@ -145,7 +145,10 @@ class Result:
         if missing:
             notes.append(f"{missing} tasks have no answer.")
         if self.target_format in {"verifiers", "nemo-gym"} and any(task.files for task in self.tasks):
-            notes.append("Sandbox files were copied under files/.")
+            if self.target_format == "nemo-gym" and (self.output / "dataset.toml").is_file():
+                notes.append("Sandbox files were copied into task folders.")
+            else:
+                notes.append("Sandbox files were copied under files/.")
         return notes
 
     def render(self) -> str:
