@@ -10,6 +10,7 @@ __all__ = [
     "catalog",
     "convert",
     "load",
+    "merge",
     "register",
 ]
 
@@ -26,6 +27,10 @@ def load(path: str, fmt: str | None = None) -> list[Task]:
 
 def convert(source: str, destination: str, to: str, source_format: str | None = None) -> Result:
     return catalog.convert(source, destination, to=to, source_format=source_format)
+
+
+def merge(sources: list[str], destination: str, to: str, source_format: str | None = None) -> Result:
+    return catalog.merge(sources, destination, to=to, source_format=source_format)
 
 
 def _load_dataset_types() -> None:
